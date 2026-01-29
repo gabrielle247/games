@@ -1,0 +1,44 @@
+name: Render Animation with Subtitles
+
+on:
+  workflow_dispatch: # Allows you to click "Run" manually
+  push:
+    paths:
+      - '**.mp3'
+      - '**.png'
+      - 'auto_caption_animator.py'
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libavcodec-extra
+          # Install fonts for subtitles
+          sudo apt-get install -y fonts-dejavu-core fonts-dejavu-extra
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Python Libraries
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Animator Script
+        run: |
+          # Use python to find the file names automatically based on the logic in main
+          python auto_caption_animator.py "dummy_arg" "dummy_arg" "final_video.mp4"
+
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rendered-Video
+          path: final_video.mp4

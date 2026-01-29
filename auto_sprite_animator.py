@@ -4,11 +4,18 @@ import numpy as np
 import warnings
 import math
 import textwrap
+import glob
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-import whisper
+# Check if whisper is installed, if not handle gracefully (though requirements.txt should handle it)
+try:
+    import whisper
+except ImportError:
+    print("CRITICAL: 'openai-whisper' not found. Please install it.")
+    sys.exit(1)
+
 from moviepy.editor import VideoClip, AudioFileClip
 from PIL import Image, ImageDraw, ImageFont
 
@@ -19,6 +26,8 @@ class AutoCaptionAnimator:
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio not found at: {audio_path}")
 
+        print(f"✅ Found assets: {image_path} | {audio_path}")
+
         self.image_path = image_path
         self.output_path = output_path
         self.fps = fps
@@ -27,20 +36,24 @@ class AutoCaptionAnimator:
         
         # --- STEP 1: LOAD AUDIO ---
         print("Loading audio...")
-        self.audio_clip = AudioFileClip(audio_path)
-        self.duration = self.audio_clip.duration
+        try:
+            self.audio_clip = AudioFileClip(audio_path)
+            self.duration = self.audio_clip.duration
+        except Exception as e:
+            print(f"❌ Error loading audio: {e}")
+            sys.exit(1)
         
         # --- STEP 2: AI TRANSCRIPTION (Whisper) ---
-        print("🤖 AI is listening to audio (Generating Subtitles)...")
-        # Load 'base' model - good balance of speed vs accuracy for CPU runners
-        # Use 'small' or 'medium' if Shona accuracy is poor, but it takes longer.
-        model = whisper.load_model("base") 
-        
-        # Transcribe
-        result = model.transcribe(audio_path, fp16=False) # fp16=False for CPU
-        self.segments = result['segments']
-        
-        print(f"✅ Generated {len(self.segments)} subtitle segments.")
+        print("🤖 AI is listening (Generating Subtitles)...")
+        # Load 'base' model - fits in GitHub Actions memory
+        try:
+            model = whisper.load_model("base") 
+            result = model.transcribe(audio_path, fp16=False)
+            self.segments = result['segments']
+            print(f"✅ Generated {len(self.segments)} subtitle segments.")
+        except Exception as e:
+            print(f"⚠️ Whisper error: {e}. Proceeding without subtitles.")
+            self.segments = []
 
         # --- STEP 3: AUDIO ANALYSIS (Volume) ---
         print("Analyzing volume dynamics...")
@@ -50,7 +63,11 @@ class AutoCaptionAnimator:
             for chunk in self.audio_clip.iter_chunks(fps=audio_fps, chunksize=audio_fps):
                 if chunk.ndim > 1: chunk = chunk.mean(axis=1)
                 self.audio_array.append(chunk)
-            raw_audio = np.concatenate(self.audio_array) if self.audio_array else np.zeros(int(self.duration * audio_fps))
+            
+            if self.audio_array:
+                raw_audio = np.concatenate(self.audio_array)
+            else:
+                raw_audio = np.zeros(int(self.duration * audio_fps))
         except:
             raw_audio = np.zeros(int(self.duration * audio_fps))
 
@@ -89,25 +106,34 @@ class AutoCaptionAnimator:
         self.canvas_w = int(self.base_width * max_scale * 1.4)
         self.canvas_h = int(self.base_height * max_scale * 1.4)
         
-        # Try to load a font, fallback to default if missing
-        try:
-            # Linux/GitHub Actions usually has DejaVuSans-Bold
-            self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
-        except:
+        # Font Loading Strategy
+        self.font = None
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", # GitHub Actions Standard
+            "arial.ttf",
+            "Arial.ttf"
+        ]
+        
+        for p in font_paths:
             try:
-                self.font = ImageFont.truetype("arial.ttf", 40)
+                self.font = ImageFont.truetype(p, 40)
+                print(f"✅ Loaded font: {p}")
+                break
             except:
-                self.font = ImageFont.load_default()
+                continue
+        
+        if self.font is None:
+            print("⚠️ Warning: No custom font found. Using default.")
+            self.font = ImageFont.load_default()
 
     def _get_subtitle_text(self, t):
-        # Linear search is fast enough for short videos
+        # Find current subtitle
         for seg in self.segments:
             if seg['start'] <= t <= seg['end']:
                 return seg['text'].strip()
         return ""
 
     def _draw_text_with_stroke(self, draw, text, x, y, font, text_color, stroke_color, stroke_width):
-        # Manually draw stroke by drawing text at offsets
         for off_x in range(-stroke_width, stroke_width + 1):
             for off_y in range(-stroke_width, stroke_width + 1):
                 draw.text((x + off_x, y + off_y), text, font=font, fill=stroke_color)
@@ -119,10 +145,12 @@ class AutoCaptionAnimator:
         vol = self.volume_per_frame[frame_idx] if frame_idx < len(self.volume_per_frame) else 0
         
         if vol > self.min_threshold:
+            # Squash & Stretch
             stretch = 1.0 + (vol * self.sensitivity)
             squash = 1.0 - (vol * (self.sensitivity/2))
             rotation_val = math.sin(t * 15) * (vol * 4)
         else:
+            # Idle breathing
             stretch = 1.0 + (math.sin(t * 2) * 0.01)
             squash = 1.0 + (math.sin(t * 2 + 1) * 0.01)
             rotation_val = 0
@@ -131,6 +159,7 @@ class AutoCaptionAnimator:
         new_w = int(self.base_width * squash)
         new_h = int(self.base_height * stretch)
         resized = self.original_pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
         if abs(rotation_val) > 0.1:
             resized = resized.rotate(rotation_val, resample=Image.Resampling.BICUBIC, expand=True)
 
@@ -142,7 +171,7 @@ class AutoCaptionAnimator:
         # 4. Paste Sprite
         bg_w, bg_h = img.size
         sp_w, sp_h = resized.size
-        anchor_y = int(self.canvas_h * 0.85) # Leave room for subtitles at bottom
+        anchor_y = int(self.canvas_h * 0.85) 
         pos_x = (bg_w - sp_w) // 2
         pos_y = anchor_y - sp_h
         img.paste(resized, (pos_x, pos_y), resized)
@@ -153,25 +182,21 @@ class AutoCaptionAnimator:
             draw = ImageDraw.Draw(img)
             
             # Text Wrapping
-            # Estimate char width approx to wrap
-            char_width = 20 # rough estimate
+            char_width = 20 # Approx
             chars_per_line = self.canvas_w // char_width
-            lines = textwrap.wrap(text, width=min(30, chars_per_line)) # Max 30 chars wide
+            lines = textwrap.wrap(text, width=min(30, chars_per_line))
             
-            # Start drawing from bottom up
             line_height = 50
             text_y_start = self.canvas_h - 40 - (len(lines) * line_height)
             
             for i, line in enumerate(lines):
-                # Calculate text size using bbox (robust)
                 bbox = draw.textbbox((0, 0), line, font=self.font)
                 text_w = bbox[2] - bbox[0]
                 text_x = (self.canvas_w - text_w) // 2
                 text_y = text_y_start + (i * line_height)
                 
-                # Draw Yellow Text with Black Stroke
                 self._draw_text_with_stroke(draw, line, text_x, text_y, self.font, 
-                                          text_color=(255, 230, 0), # Cyber Yellow
+                                          text_color=(255, 230, 0), 
                                           stroke_color=(0, 0, 0), 
                                           stroke_width=3)
         
@@ -187,32 +212,53 @@ class AutoCaptionAnimator:
             fps=self.fps, 
             codec="libx264", 
             audio_codec="aac",
-            threads=4,
-            preset="fast" # Faster encode for CI
+            threads=2, # Safer for GH Actions
+            preset="ultrafast" # Speed over size
         )
         print("Done. Maximum Impact achieved.")
 
 if __name__ == "__main__":
-    # Standard Argument Parsing
-    img_file = sys.argv[1] if len(sys.argv) > 1 else "character.png"
-    audio_file = sys.argv[2] if len(sys.argv) > 2 else "reply.mp3"
-    output_file = sys.argv[3] if len(sys.argv) > 3 else "output.mp4"
-    
-    # Auto-Search fallback (useful for local test)
-    if not os.path.exists(img_file):
-        for f in os.listdir('.'):
-            if f.endswith(('.png', '.jpg')):
-                img_file = f
-                break
-    if not os.path.exists(audio_file):
-        for f in os.listdir('.'):
-            if f.endswith('.mp3'):
-                audio_file = f
-                break
-                
-    try:
-        animator = AutoCaptionAnimator(img_file, audio_file, output_file)
-        animator.render()
-    except Exception as e:
-        print(f"Error: {e}")
+    # --- AUTO-DETECTION LOGIC ---
+    print(f"Current Working Directory: {os.getcwd()}")
+    print("Files in Directory:", os.listdir('.'))
+
+    # Try to find assets automatically if not passed
+    img_file = None
+    audio_file = None
+    output_file = "final_video.mp4"
+
+    # Find Audio
+    audio_extensions = ['*.mp3', '*.wav', '*.m4a']
+    for ext in audio_extensions:
+        matches = glob.glob(ext)
+        if matches:
+            audio_file = matches[0]
+            break
+
+    # Find Image
+    img_extensions = ['*.png', '*.jpg', '*.jpeg']
+    for ext in img_extensions:
+        matches = glob.glob(ext)
+        if matches:
+            img_file = matches[0]
+            break
+
+    # Override with arguments if provided
+    if len(sys.argv) > 1 and sys.argv[1] != "dummy_arg": img_file = sys.argv[1]
+    if len(sys.argv) > 2 and sys.argv[2] != "dummy_arg": audio_file = sys.argv[2]
+    if len(sys.argv) > 3: output_file = sys.argv[3]
+
+    if img_file and audio_file:
+        try:
+            animator = AutoCaptionAnimator(img_file, audio_file, output_file)
+            animator.render()
+        except Exception as e:
+            print(f"CRITICAL ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    else:
+        print("❌ Could not auto-detect input files.")
+        print(f"Found Audio: {audio_file}")
+        print(f"Found Image: {img_file}")
         sys.exit(1)

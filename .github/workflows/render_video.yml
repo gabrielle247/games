@@ -1,12 +1,12 @@
 name: Render Animation with Subtitles
 
 on:
-  workflow_dispatch: # Allows you to click "Run" manually
+  workflow_dispatch:
   push:
     paths:
       - '**.mp3'
       - '**.png'
-      - 'auto_caption_animator.py'
+      - 'auto_sprite_animator.py'
 
 jobs:
   render:
@@ -19,9 +19,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libavcodec-extra
-          # Install fonts for subtitles
-          sudo apt-get install -y fonts-dejavu-core fonts-dejavu-extra
+          sudo apt-get install -y ffmpeg libavcodec-extra fonts-dejavu-core fonts-dejavu-extra
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -30,12 +28,14 @@ jobs:
 
       - name: Install Python Libraries
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run Animator Script
         run: |
-          # Use python to find the file names automatically based on the logic in main
-          python auto_caption_animator.py "dummy_arg" "dummy_arg" "final_video.mp4"
+          # We pass 'dummy_arg' so the script uses its internal auto-detection logic
+          # Make sure the script name here matches your repo filename EXACTLY
+          python auto_sprite_animator.py "dummy_arg" "dummy_arg" "final_video.mp4"
 
       - name: Upload Video Artifact
         uses: actions/upload-artifact@v4

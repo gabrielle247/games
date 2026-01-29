@@ -1,0 +1,6 @@
+moviepy
+numpy
+pillow
+openai-whisper
+torch
+scipy
